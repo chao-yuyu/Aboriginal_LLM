@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, Depends, HTTPException, status
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -17,7 +18,14 @@ from pydub import AudioSegment
 from math import log, ceil
 from io import BytesIO
 
-app = FastAPI()
+api_key = APIKeyHeader(name="Authorization")
+
+def verify_api_key(key: str = Depends(api_key)):
+    if key != "N84ahY]PZP*EEQ":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+
+app = FastAPI(dependencies=[Depends(verify_api_key)])
+
 
 # 添加請求模型
 class ChatRequest(BaseModel):
@@ -208,7 +216,12 @@ async def _process_chat(uuid: str, query: str, use_history: bool = False):
 
     def remove_think_tags(text: str) -> str:
         # 保留原始內容，不做任何處理
-        return text
+        return text.replace("<think>", "").replace("</think>", "").strip()
+    
+    def is_only_punctuation(text: str) -> bool:
+        # 定義標點符號
+        punctuation = """!()-[]{};:'"\\,<>./?@#$%^&*_~。，！？；：「」（）、"""
+        return all(char in punctuation or char.isspace() for char in text)
 
     def make_chunks(audio_segment, chunk_length):
         """
@@ -311,7 +324,9 @@ async def _process_chat(uuid: str, query: str, use_history: bool = False):
         }
 
     # 系統prompt - 讓LLM扮演服裝店店員並了解function calling
-    system_prompt = """你是一位專業的服裝店店員，特別專精於原住民傳統服飾。你的特點是：
+    system_prompt = """
+/no_think
+你是一位專業的服裝店店員，特別專精於原住民傳統服飾。你的特點是：
 
 1. **專業知識**：對泰雅族、排灣族、魯凱族的傳統服飾有深入了解
 2. **熱情服務**：總是以親切、熱情的態度為客人服務
@@ -382,8 +397,19 @@ async def _process_chat(uuid: str, query: str, use_history: bool = False):
                                         # 處理一般文字回應
                                         if "delta" in choice and "content" in choice["delta"]:
                                             content = choice["delta"].get("content", "")
-                                            if content:
+                                            content = remove_think_tags(re.sub(r"\[.*?\]", "", content))
+
+                                            if content.strip():
                                                 accumulated_text += content
+
+                                                if any(char in accumulated_text for char in '.!?。！？'):
+                                                    # 確認累積的文字不是只有標點符號
+                                                    if not is_only_punctuation(accumulated_text):
+                                                        # Convert text to speech and get the audio data
+                                                        audio_data = text_to_speech(accumulated_text)
+                                                        if audio_data:
+                                                            client_queues[uuid].put(audio_data)
+                                                    accumulated_text = ""
                                         
                                         # 處理function calling
                                         if "delta" in choice and "tool_calls" in choice["delta"]:
@@ -405,6 +431,12 @@ async def _process_chat(uuid: str, query: str, use_history: bool = False):
                     except Exception as e:
                         print(f"Error processing line: {str(e)}")
                         continue
+
+            # # 處理完整的LLM回應（如果有文字回應）
+            # if accumulated_text.strip():
+            #     audio_data = text_to_speech(accumulated_text)
+            #     if audio_data:
+            #         client_queues[uuid].put(audio_data)
 
             # 處理function calls
             if function_calls:
@@ -435,27 +467,13 @@ async def _process_chat(uuid: str, query: str, use_history: bool = False):
                             # 將結果添加到隊列
                             recommendation_data = {
                                 'type': 'clothing_recommendation',
-                                'function_result': result,
-                                'recommendations': result["recommendations"],
-                                'unique_ids': result["unique_ids"],
-                                'message': result["message"],
-                                'display_text': {
-                                    'text': f"為您推薦以下傳統服飾 (共{result['total_items']}件)",
-                                    'name': 'Shizuku',
-                                    'avatar': 'shizuku.png'
-                                },
-                                'actions': {
-                                    'type': 'show_clothing_recommendations',
-                                    'data': result["recommendations"],
-                                    'unique_ids': result["unique_ids"]
-                                },
-                                'forwarded': False
+                                'function_result': result['recommendations'],
                             }
                             client_queues[uuid].put(recommendation_data)
                             
-                            # 更新accumulated_text以包含function結果
-                            function_response = f"\n\n{result['message']}，包含以下服飾ID：{', '.join(result['unique_ids'])}"
-                            accumulated_text += function_response
+                            # # 更新accumulated_text以包含function結果
+                            # function_response = f"\n\n{result['message']}，包含以下服飾ID：{', '.join(result['unique_ids'])}"
+                            # accumulated_text += function_response
                             
                         except Exception as e:
                             print(f"Function execution error: {str(e)}")
@@ -503,11 +521,7 @@ async def _process_chat(uuid: str, query: str, use_history: bool = False):
                     function_response = f"\n\n{result['message']}，包含以下服飾ID：{', '.join(result['unique_ids'])}"
                     accumulated_text += function_response
 
-            # 處理完整的LLM回應（如果有文字回應）
-            if accumulated_text.strip():
-                audio_data = text_to_speech(accumulated_text)
-                if audio_data:
-                    client_queues[uuid].put(audio_data)
+
 
     except Exception as e:
         print(f"Error in chat_with_llm: {str(e)}")
@@ -538,10 +552,7 @@ async def res_llm_queue(uuid: str = Query(..., description="UUID of the client")
 
     # 獲取最新的回應，清空隊列中的舊回應
     if not client_queues[uuid].empty():
-        latest_response = None
-        while not client_queues[uuid].empty():
-            latest_response = client_queues[uuid].get()
-        return {"responses": latest_response}
+        return {"responses": client_queues[uuid].get()}
     else:
         return {"error": "No responses available"}
 
