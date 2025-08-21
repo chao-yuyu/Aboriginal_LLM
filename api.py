@@ -18,22 +18,30 @@ from pydub import AudioSegment
 from math import log, ceil
 from io import BytesIO
 
-api_key = APIKeyHeader(name="Authorization")
+# api_key = APIKeyHeader(name="Authorization")
 
-def verify_api_key(key: str = Depends(api_key)):
-    if key != "N84ahY]PZP*EEQ":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+# def verify_api_key(key: str = Depends(api_key)):
+#     if key != "N84ahY]PZP*EEQ":
+#         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
 
-app = FastAPI(dependencies=[Depends(verify_api_key)])
+# app = FastAPI(dependencies=[Depends(verify_api_key)])
 
+app = FastAPI()
+
+# 添加請求模型
+class ResponseLLM(BaseModel):
+    uuid: str
+    key: str
 
 # 添加請求模型
 class ChatRequest(BaseModel):
     uuid: str
     query: str
+    key: str
 
 class InitRequest(BaseModel):
     uuid: str
+    key: str
 
 # Global dictionary to store queues and conversation history for each client
 client_queues = {}
@@ -180,29 +188,39 @@ def detect_clothing_recommendation_need(text: str) -> dict:
     return {"should_recommend": False}
 
 @app.post("/init_llm")
-async def init_llm(uuid: str = Query(..., description="UUID of the client")):
+async def init_llm(uuid: str = Query(..., description="UUID of the client"),key: str = Query(..., description="API Key")):
+    if key != "N84ahY]PZP*EEQ":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+
     if uuid not in client_queues:
         client_queues[uuid] = Queue()
         client_conversations[uuid] = []  # 初始化對話歷史
     return {"message": "Queue initialized for client", "uuid": uuid}
 
+
 @app.post("/init_llm_json")
 async def init_llm_json(request: InitRequest):
     """使用 JSON body 初始化 LLM - 更容易處理中文"""
+    if request.key != "N84ahY]PZP*EEQ":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+
     if request.uuid not in client_queues:
         client_queues[request.uuid] = Queue()
         client_conversations[request.uuid] = []  # 初始化對話歷史
     return {"message": "Queue initialized for client", "uuid": request.uuid}
 
+@app.post("/chat_with_llm_json")
+async def chat_with_llm_json(request: ChatRequest):
+    """使用 JSON body 聊天 - 更容易處理中文（無歷史記錄）"""
+    if request.key != "N84ahY]PZP*EEQ":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+
+    return await _process_chat(request.uuid, request.query, use_history=False)
+
 @app.post("/chat_with_llm")
 async def chat_with_llm(uuid: str = Query(..., description="UUID of the client"), query: str = Query(..., description="Query text")):
     # 原有的 query parameter 版本（無歷史記錄）
     return await _process_chat(uuid, query, use_history=False)
-
-@app.post("/chat_with_llm_json")
-async def chat_with_llm_json(request: ChatRequest):
-    """使用 JSON body 聊天 - 更容易處理中文（無歷史記錄）"""
-    return await _process_chat(request.uuid, request.query, use_history=False)
 
 @app.post("/chat_with_llm_json_history")
 async def chat_with_llm_json_history(request: ChatRequest):
@@ -546,7 +564,11 @@ async def _process_chat(uuid: str, query: str, use_history: bool = False):
     return {"message": "finished llm chat"}
 
 @app.post("/res_llm_queue")
-async def res_llm_queue(uuid: str = Query(..., description="UUID of the client")):
+async def res_llm_queue(request: ResponseLLM):
+    if request.key != "N84ahY]PZP*EEQ":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+
+    uuid = request.uuid
     if uuid not in client_queues:
         return {"error": "Client UUID not initialized. Please call /init_llm first."}
 
